@@ -19,7 +19,7 @@ chmod +x build.sh
 ./build.sh
 ```
 
-构建脚本会自动：检测 JDK 21+、下载依赖（montoya-api 2025.5 / gson / nanohttpd）、编译、把扩展描述符（`META-INF/extensions/burp-extension.properties`）打入 jar、打包 fat jar。无需 Gradle。
+构建脚本会通过项目自带的 Gradle Wrapper 下载依赖、编译源码，并打包可加载到 Burp 的 fat jar。无需预先安装 Gradle。
 
 输出：`build/libs/burp-mcp-full.jar`。
 
@@ -170,12 +170,12 @@ POST http://127.0.0.1:9876
 | 扫描返回 "requires Burp Professional" | 正常，Community 版不支持 Scanner API |
 | `remove_http_handler` / `remove_proxy_rule` 无效 | 确认之前 `register_*` 返回 success=true |
 
-## 源码构建（Gradle 可选）
+## 源码构建（Gradle Wrapper）
 
 ```bash
 cd burp-mcp-full
-gradle jar      # 需本机已装 Gradle 8.7+
+bash gradlew jar
 # 输出: build/libs/burp-mcp-full.jar
 ```
 
-> 推荐使用 `build.bat` / `build.sh`（零依赖，自动下载 jar）。Gradle 路径仅作备选。
+> `build.bat` / `build.sh` 调用同一个 Gradle Wrapper，无需预先安装 Gradle。

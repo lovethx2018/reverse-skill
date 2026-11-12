@@ -20,6 +20,9 @@ import burp.api.montoya.scanner.audit.issues.AuditIssueConfidence;
 import burp.api.montoya.scanner.audit.issues.AuditIssueSeverity;
 import burp.api.montoya.sitemap.SiteMapFilter;
 import com.google.gson.*;
+import com.posthog.server.PostHogCaptureOptions;
+import com.posthog.server.PostHogRequestContext;
+import com.posthog.server.PostHogRequestContextData;
 import fi.iki.elonen.NanoHTTPD;
 
 import java.io.IOException;
@@ -46,15 +49,17 @@ import java.util.stream.Collectors;
 
 public class McpHttpServer extends NanoHTTPD {
     private final MontoyaApi api;
+    private final PostHogClient posthog;
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
     private final String authToken;
     private CollaboratorClient collaborator;
     private volatile Audit activeAudit = null;
     private volatile Crawl activeCrawl = null;
 
-    public McpHttpServer(MontoyaApi api, int port) {
+    public McpHttpServer(MontoyaApi api, int port, PostHogClient posthog) {
         super("127.0.0.1", port);
         this.api = api;
+        this.posthog = posthog;
         this.authToken = resolveAuthToken();
     }
 
@@ -149,22 +154,72 @@ public class McpHttpServer extends NanoHTTPD {
             Response resp = newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, "text/plain", "POST only");
             addCorsHeaders(resp); return resp;
         }
+        String tool = null;
         try {
             Map<String, String> bodyMap = new HashMap<>();
             session.parseBody(bodyMap);
             String body = bodyMap.get("postData");
             if (body == null) body = "";
             JsonObject request = JsonParser.parseString(body).getAsJsonObject();
-            String tool = request.has("tool") ? request.get("tool").getAsString() : "";
+            tool = request.has("tool") ? request.get("tool").getAsString() : "";
             JsonObject params = request.has("params") ? request.getAsJsonObject("params") : new JsonObject();
             JsonObject result = dispatch(tool, params);
+            captureToolCall(tool, result);
             Response resp = newFixedLengthResponse(Response.Status.OK, "application/json", gson.toJson(result));
             addCorsHeaders(resp); return resp;
         } catch (Exception e) {
+            if (tool != null) {
+                JsonObject failedResult = new JsonObject();
+                failedResult.addProperty("error", true);
+                captureToolCall(tool, failedResult);
+            }
+            captureUnhandledRequestError(e);
             JsonObject err = new JsonObject(); err.addProperty("error", e.getMessage());
             Response resp = newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json", gson.toJson(err));
             addCorsHeaders(resp); return resp;
         }
+    }
+
+    /**
+     * Reports failures that escape MCP request dispatch. The Java server SDK has no
+     * automatic exception capture, so this top-level boundary is the single place
+     * unexpected request errors are reported without interrupting MCP traffic.
+     */
+    private void captureUnhandledRequestError(Exception error) {
+        capturePersonlessEvent(
+                "error_occurred",
+                PostHogCaptureOptions.builder()
+                        .property("error_type", error.getClass().getSimpleName())
+                        .property("source", "mcp_http_server")
+                        .build());
+    }
+
+    /** Records each tool invocation without capturing tool arguments or results. */
+    private void captureToolCall(String tool, JsonObject result) {
+        capturePersonlessEvent(
+                "$mcp_tool_call",
+                PostHogCaptureOptions.builder()
+                        .property("tool_name", tool)
+                        .property("outcome", result.has("error") ? "failure" : "success")
+                        .build());
+    }
+
+    /**
+     * Emits an event without a distinct id because this MCP server has no stable user identity.
+     * The SDK request context sends it as a personless event with an auto-generated identifier.
+     */
+    private void capturePersonlessEvent(String event, PostHogCaptureOptions options) {
+        posthog.client().ifPresent(client -> {
+            try {
+                PostHogRequestContextData context = PostHogRequestContext.fromHeaders(
+                        Collections.emptyMap(), false, Collections.emptyMap());
+                try (PostHogRequestContext.Scope ignored = PostHogRequestContext.beginScope(context, true)) {
+                    client.capture(event, options);
+                }
+            } catch (RuntimeException ignored) {
+                // Analytics delivery must not affect the MCP response.
+            }
+        });
     }
 
     private JsonObject dispatch(String tool, JsonObject params) {

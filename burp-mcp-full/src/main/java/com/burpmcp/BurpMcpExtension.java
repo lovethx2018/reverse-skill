@@ -23,6 +23,7 @@ public class BurpMcpExtension implements BurpExtension {
     private MontoyaApi api;
     private Logging logging;
     private McpHttpServer server;
+    private PostHogClient posthog;
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -30,16 +31,19 @@ public class BurpMcpExtension implements BurpExtension {
         this.logging = api.logging();
 
         api.extension().setName("MCP Full Control");
+        posthog = PostHogClient.initialize();
 
         int port = resolvePort(logging);
         try {
-            server = new McpHttpServer(api, port);
+            server = new McpHttpServer(api, port, posthog);
             server.start();
+            posthog.logServerStarted(port);
             logging.logToOutput("[MCP] Server started on http://127.0.0.1:" + port);
             logging.logToOutput("[MCP] Configure port via -Dburp.mcp.port=<n> or BURP_MCP_PORT env var (default 9876)");
             logging.logToOutput("[MCP] Auth token: ~/.burp-mcp-token (override with -Dburp.mcp.token or BURP_MCP_TOKEN)");
             logging.logToOutput("[MCP] Tools: proxy_history, send_request, intruder_attack, repeater, scanner, sitemap, intercept, encode/decode");
         } catch (Exception e) {
+            posthog.logServerStartFailed(port);
             logging.logToError("[MCP] Failed to start server on port " + port + ": " + e.getMessage());
             logging.logToError("[MCP] If port is in use, set -Dburp.mcp.port=<other> and restart Burp.");
         }
@@ -47,7 +51,11 @@ public class BurpMcpExtension implements BurpExtension {
         api.extension().registerUnloadingHandler(() -> {
             if (server != null) {
                 server.stop();
+                posthog.logServerStopped();
                 logging.logToOutput("[MCP] Server stopped");
+            }
+            if (posthog != null) {
+                posthog.close();
             }
         });
     }
